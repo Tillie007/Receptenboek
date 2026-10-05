@@ -1,118 +1,16 @@
-const ALLOWED_ORIGINS = ['https://tillie007.github.io','https://receptenboek-gold.vercel.app','https://receptenboek-timvan-camp-9476.vercel.app'];
-
-function cors(req,res) {
-  const origin=req.headers.origin||'';
-  if(ALLOWED_ORIGINS.includes(origin)) res.setHeader('Access-Control-Allow-Origin',origin);
-  res.setHeader('Access-Control-Allow-Methods','POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers','Content-Type');
-  res.setHeader('Vary','Origin');
-}
-function isPrivateHost(host) {
-  const h=host.toLowerCase();
-  return h==='localhost'||h==='127.0.0.1'||h==='0.0.0.0'||h==='::1'||h.endsWith('.local')||
-    /^10\./.test(h)||/^192\.168\./.test(h)||/^169\.254\./.test(h)||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(h);
-}
-function stripHtml(s=''){return String(s).replace(/<[^>]*>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&eacute;/g,'é').replace(/&egrave;/g,'è').replace(/&agrave;/g,'à').replace(/\s+/g,' ').trim()}
-function findRecipe(o){
-  if(!o)return null;
-  if(Array.isArray(o)){for(const x of o){const y=findRecipe(x);if(y)return y}}
-  else if(typeof o==='object'){
-    const t=o['@type'];
-    if(t==='Recipe'||(Array.isArray(t)&&t.includes('Recipe')))return o;
-    if(o['@graph']){const y=findRecipe(o['@graph']);if(y)return y}
-    for(const k of ['mainEntity','mainEntityOfPage']){if(o[k]){const y=findRecipe(o[k]);if(y)return y}}
-  }
-  return null;
-}
+const ALLOWED_ORIGINS=['https://tillie007.github.io','https://receptenboek-gold.vercel.app','https://receptenboek-timvan-camp-9476.vercel.app'];
+function cors(req,res){const o=req.headers.origin||'';if(ALLOWED_ORIGINS.includes(o))res.setHeader('Access-Control-Allow-Origin',o);res.setHeader('Access-Control-Allow-Methods','POST,OPTIONS');res.setHeader('Access-Control-Allow-Headers','Content-Type');res.setHeader('Vary','Origin')}
+function isPrivateHost(host){const h=host.toLowerCase();return h==='localhost'||h==='127.0.0.1'||h==='0.0.0.0'||h==='::1'||h.endsWith('.local')||/^10\./.test(h)||/^192\.168\./.test(h)||/^169\.254\./.test(h)||/^172\.(1[6-9]|2\d|3[01])\./.test(h)}
+function decodeEntities(s=''){return String(s).replace(/&nbsp;|&#160;/gi,' ').replace(/&amp;/gi,'&').replace(/&quot;/gi,'"').replace(/&#39;|&apos;/gi,"'").replace(/&eacute;/gi,'é').replace(/&egrave;/gi,'è').replace(/&agrave;/gi,'à').replace(/&uuml;/gi,'ü').replace(/&ouml;/gi,'ö').replace(/&#(\d+);/g,(_,n)=>String.fromCharCode(+n))}
+function stripHtml(s=''){return decodeEntities(String(s).replace(/<br\s*\/?>/gi,'\n').replace(/<[^>]*>/g,' ')).replace(/[ \t]+/g,' ').replace(/\s*\n\s*/g,'\n').trim()}
+function findRecipes(o,out=[]){if(!o)return out;if(Array.isArray(o)){for(const x of o)findRecipes(x,out)}else if(typeof o==='object'){const t=o['@type'];if(t==='Recipe'||(Array.isArray(t)&&t.includes('Recipe')))out.push(o);for(const [k,v] of Object.entries(o)){if(k!=='@context'&&k!=='@type')findRecipes(v,out)}}return out}
 function typeOf(x){const t=x?.['@type'];return Array.isArray(t)?t:[t].filter(Boolean)}
-function instructions(v,depth=0){
-  if(!v)return[];
-  if(typeof v==='string')return v.split(/\n+/).map(stripHtml).filter(Boolean);
-  if(Array.isArray(v))return v.flatMap(x=>instructions(x,depth)).filter(Boolean);
-  if(typeof v!=='object')return[];
-  const types=typeOf(v);
-  const nested=v.itemListElement||v.steps||v.recipeInstructions||v.itemList;
-  if(types.includes('HowToSection')||nested){
-    const name=stripHtml(v.name||v.headline||'');
-    const children=instructions(nested,depth+1);
-    // Preserve meaningful recipe section names as a visible divider in the editable steps.
-    return name&&children.length?[`§ ${name}`,...children]:children;
-  }
-  const text=stripHtml(v.text||v.description||v.name||'');
-  return text?[text]:[];
-}
-function author(v){
-  if(!v)return'';
-  if(typeof v==='string')return v;
-  if(Array.isArray(v))return v.map(author).filter(Boolean).join(', ');
-  return v.name||'';
-}
-function image(v){
-  if(!v)return'';
-  if(typeof v==='string')return v;
-  if(Array.isArray(v))return image(v[0]);
-  return v.url||v.contentUrl||'';
-}
-function decodeJsonLd(raw){
-  const candidates=[raw,raw.replace(/[\u0000-\u001F]+/g,' ')];
-  for(const c of candidates){try{return JSON.parse(c)}catch{}}
-  return null;
-}
-function parseJsonLd(html){
-  const re=/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-  let m,best=null,bestScore=-1;
-  while((m=re.exec(html))){
-    const obj=decodeJsonLd(m[1].trim());
-    const r=findRecipe(obj);
-    if(r){
-      const score=(Array.isArray(r.recipeIngredient)?r.recipeIngredient.length:0)+instructions(r.recipeInstructions).filter(x=>!x.startsWith('§ ')).length*2;
-      if(score>bestScore){best=r;bestScore=score}
-    }
-  }
-  return best;
-}
-function normalize(r,url){
-  const cat=Array.isArray(r.recipeCategory)?r.recipeCategory.join(', '):(r.recipeCategory||'');
-  const y=Array.isArray(r.recipeYield)?r.recipeYield.join(', '):(r.recipeYield||'');
-  return {
-    title:stripHtml(r.name||''),
-    type:stripHtml(cat),
-    season:'',
-    servings:stripHtml(y),
-    wine:'',
-    chef:stripHtml(author(r.author)),
-    rating:0,
-    source:url,
-    image:image(r.image),
-    ingredients:(r.recipeIngredient||[]).map(stripHtml).filter(Boolean),
-    steps:instructions(r.recipeInstructions),
-    notes:'',
-    prepTime:r.prepTime||'',
-    cookTime:r.cookTime||'',
-    totalTime:r.totalTime||'',
-    cuisine:Array.isArray(r.recipeCuisine)?r.recipeCuisine.join(', '):(r.recipeCuisine||'')
-  };
-}
-export default async function handler(req,res){
-  cors(req,res);
-  if(req.method==='OPTIONS')return res.status(204).end();
-  if(req.method!=='POST')return res.status(405).json({error:'Gebruik POST.'});
-  try{
-    const input=typeof req.body==='string'?JSON.parse(req.body):req.body;
-    const target=new URL(input?.url||'');
-    if(!['http:','https:'].includes(target.protocol)||isPrivateHost(target.hostname))return res.status(400).json({error:'Ongeldige receptlink.'});
-    const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),12000);
-    const upstream=await fetch(target.toString(),{signal:controller.signal,redirect:'follow',headers:{'User-Agent':'Mozilla/5.0 (compatible; MijnRecepten/1.1)','Accept':'text/html,application/xhtml+xml'}});
-    clearTimeout(timer);
-    if(!upstream.ok)throw new Error('Website antwoordde met '+upstream.status);
-    const type=upstream.headers.get('content-type')||'';
-    if(!type.includes('text/html'))throw new Error('De link is geen webpagina.');
-    const html=(await upstream.text()).slice(0,5000000);
-    const recipe=parseJsonLd(html);
-    if(!recipe)return res.status(422).json({error:'Geen gestructureerd recept gevonden op deze pagina.'});
-    return res.status(200).json({ok:true,recipe:normalize(recipe,target.toString())});
-  }catch(e){
-    return res.status(400).json({error:e?.name==='AbortError'?'De website reageerde te traag.':(e?.message||'Importeren mislukt.')});
-  }
-}
+function instructions(v){if(!v)return[];if(typeof v==='string')return v.split(/\n+/).map(stripHtml).filter(Boolean);if(Array.isArray(v))return v.flatMap(instructions).filter(Boolean);if(typeof v!=='object')return[];const types=typeOf(v),nested=v.itemListElement||v.steps||v.recipeInstructions||v.itemList;if(types.includes('HowToSection')||nested){const name=stripHtml(v.name||v.headline||''),children=instructions(nested);return name&&children.length?[`§ ${name}`,...children]:children}const text=stripHtml(v.text||v.description||v.name||'');return text?[text]:[]}
+function author(v){if(!v)return'';if(typeof v==='string')return v;if(Array.isArray(v))return v.map(author).filter(Boolean).join(', ');return v.name||''}
+function image(v){if(!v)return'';if(typeof v==='string')return v;if(Array.isArray(v))return image(v[0]);return v.url||v.contentUrl||''}
+function decodeJsonLd(raw){for(const c of [raw,raw.replace(/[\u0000-\u001F]+/g,' ')]){try{return JSON.parse(c)}catch{}}return null}
+function parseJsonLd(html){const re=/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;let m,best=null,bestScore=-1;while((m=re.exec(html))){const obj=decodeJsonLd(m[1].trim());for(const r of findRecipes(obj,[])){const score=(Array.isArray(r.recipeIngredient)?r.recipeIngredient.length:0)+instructions(r.recipeInstructions).filter(x=>!x.startsWith('§ ')).length*3;if(score>bestScore){best=r;bestScore=score}}}return best}
+function cleanBlocks(items){const out=[];for(let s of items.map(stripHtml).filter(Boolean)){s=s.replace(/^\s*(?:stap\s*)?\d+[.)\-:]?\s*/i,'').trim();if(s.length>2&&!out.includes(s))out.push(s)}return out}
+function htmlPreparation(html){let zone=html;const start=html.search(/(?:>\s*(?:Bereiding|Bereidingswijze|Voorbereiding)\s*<|["'](?:preparation|preparation-method|recipe-instructions|instructions)["'])/i);if(start>=0)zone=html.slice(start,Math.min(html.length,start+250000));const stop=zone.search(/>\s*(?:Tips?|Notities?|Reacties?|Meer recepten|Ingrediënten)\s*</i);if(stop>500)zone=zone.slice(0,stop);let vals=[];const selectors=[/<(?:li|p)\b[^>]*(?:class|itemprop)=["'][^"']*(?:step|instruction|preparation|method)[^"']*["'][^>]*>([\s\S]*?)<\/(?:li|p)>/gi,/<li\b[^>]*>([\s\S]*?)<\/li>/gi,/<p\b[^>]*>([\s\S]*?)<\/p>/gi];for(const re of selectors){let m;const a=[];while((m=re.exec(zone))&&a.length<100)a.push(m[1]);const cleaned=cleanBlocks(a).filter(x=>x.length>12);if(cleaned.length>vals.length)vals=cleaned;if(vals.length>=5)break}return vals}
+function normalize(r,url,html){const cat=Array.isArray(r.recipeCategory)?r.recipeCategory.join(', '):(r.recipeCategory||''),y=Array.isArray(r.recipeYield)?r.recipeYield.join(', '):(r.recipeYield||'');let steps=instructions(r.recipeInstructions);const flat=steps.filter(x=>!x.startsWith('§ '));const fallback=htmlPreparation(html);if(fallback.length>flat.length)steps=fallback;return{title:stripHtml(r.name||''),type:stripHtml(cat),season:'',servings:stripHtml(y),wine:'',chef:stripHtml(author(r.author)),rating:0,source:url,image:image(r.image),ingredients:(r.recipeIngredient||[]).map(stripHtml).filter(Boolean),steps,notes:'',prepTime:r.prepTime||'',cookTime:r.cookTime||'',totalTime:r.totalTime||'',cuisine:Array.isArray(r.recipeCuisine)?r.recipeCuisine.join(', '):(r.recipeCuisine||'')}}
+export default async function handler(req,res){cors(req,res);if(req.method==='OPTIONS')return res.status(204).end();if(req.method!=='POST')return res.status(405).json({error:'Gebruik POST.'});try{const input=typeof req.body==='string'?JSON.parse(req.body):req.body,target=new URL(input?.url||'');if(!['http:','https:'].includes(target.protocol)||isPrivateHost(target.hostname))return res.status(400).json({error:'Ongeldige receptlink.'});const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),12000);const upstream=await fetch(target.toString(),{signal:controller.signal,redirect:'follow',headers:{'User-Agent':'Mozilla/5.0 (compatible; MijnRecepten/1.2)','Accept':'text/html,application/xhtml+xml'}});clearTimeout(timer);if(!upstream.ok)throw new Error('Website antwoordde met '+upstream.status);if(!(upstream.headers.get('content-type')||'').includes('text/html'))throw new Error('De link is geen webpagina.');const html=(await upstream.text()).slice(0,5000000),recipe=parseJsonLd(html);if(!recipe)return res.status(422).json({error:'Geen gestructureerd recept gevonden op deze pagina.'});return res.status(200).json({ok:true,recipe:normalize(recipe,target.toString(),html)})}catch(e){return res.status(400).json({error:e?.name==='AbortError'?'De website reageerde te traag.':(e?.message||'Importeren mislukt.')})}}
