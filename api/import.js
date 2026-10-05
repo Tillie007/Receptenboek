@@ -1,10 +1,11 @@
-const ALLOWED_ORIGIN = 'https://tillie007.github.io';
+const ALLOWED_ORIGINS = ['https://tillie007.github.io','https://receptenboek-gold.vercel.app','https://receptenboek-timvan-camp-9476.vercel.app'];
 
-function cors(res) {
-  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
-  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Vary', 'Origin');
+function cors(req,res) {
+  const origin=req.headers.origin||'';
+  if(ALLOWED_ORIGINS.includes(origin)) res.setHeader('Access-Control-Allow-Origin',origin);
+  res.setHeader('Access-Control-Allow-Methods','POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers','Content-Type');
+  res.setHeader('Vary','Origin');
 }
 function isPrivateHost(host) {
   const h=host.toLowerCase();
@@ -12,7 +13,7 @@ function isPrivateHost(host) {
     /^10\./.test(h)||/^192\.168\./.test(h)||/^169\.254\./.test(h)||
     /^172\.(1[6-9]|2\d|3[01])\./.test(h);
 }
-function stripHtml(s=''){return String(s).replace(/<[^>]*>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/\s+/g,' ').trim()}
+function stripHtml(s=''){return String(s).replace(/<[^>]*>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&eacute;/g,'é').replace(/&egrave;/g,'è').replace(/&agrave;/g,'à').replace(/\s+/g,' ').trim()}
 function findRecipe(o){
   if(!o)return null;
   if(Array.isArray(o)){for(const x of o){const y=findRecipe(x);if(y)return y}}
@@ -24,16 +25,22 @@ function findRecipe(o){
   }
   return null;
 }
-function instructions(v){
+function typeOf(x){const t=x?.['@type'];return Array.isArray(t)?t:[t].filter(Boolean)}
+function instructions(v,depth=0){
   if(!v)return[];
   if(typeof v==='string')return v.split(/\n+/).map(stripHtml).filter(Boolean);
-  if(Array.isArray(v))return v.flatMap(x=>{
-    if(typeof x==='string')return[stripHtml(x)];
-    if(x?.itemListElement)return instructions(x.itemListElement);
-    if(x?.text)return[stripHtml(x.text)];
-    return[];
-  }).filter(Boolean);
-  return v?.text?[stripHtml(v.text)]:[];
+  if(Array.isArray(v))return v.flatMap(x=>instructions(x,depth)).filter(Boolean);
+  if(typeof v!=='object')return[];
+  const types=typeOf(v);
+  const nested=v.itemListElement||v.steps||v.recipeInstructions||v.itemList;
+  if(types.includes('HowToSection')||nested){
+    const name=stripHtml(v.name||v.headline||'');
+    const children=instructions(nested,depth+1);
+    // Preserve meaningful recipe section names as a visible divider in the editable steps.
+    return name&&children.length?[`§ ${name}`,...children]:children;
+  }
+  const text=stripHtml(v.text||v.description||v.name||'');
+  return text?[text]:[];
 }
 function author(v){
   if(!v)return'';
@@ -54,13 +61,16 @@ function decodeJsonLd(raw){
 }
 function parseJsonLd(html){
   const re=/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-  let m;
+  let m,best=null,bestScore=-1;
   while((m=re.exec(html))){
     const obj=decodeJsonLd(m[1].trim());
     const r=findRecipe(obj);
-    if(r)return r;
+    if(r){
+      const score=(Array.isArray(r.recipeIngredient)?r.recipeIngredient.length:0)+instructions(r.recipeInstructions).filter(x=>!x.startsWith('§ ')).length*2;
+      if(score>bestScore){best=r;bestScore=score}
+    }
   }
-  return null;
+  return best;
 }
 function normalize(r,url){
   const cat=Array.isArray(r.recipeCategory)?r.recipeCategory.join(', '):(r.recipeCategory||'');
@@ -85,7 +95,7 @@ function normalize(r,url){
   };
 }
 export default async function handler(req,res){
-  cors(res);
+  cors(req,res);
   if(req.method==='OPTIONS')return res.status(204).end();
   if(req.method!=='POST')return res.status(405).json({error:'Gebruik POST.'});
   try{
@@ -93,7 +103,7 @@ export default async function handler(req,res){
     const target=new URL(input?.url||'');
     if(!['http:','https:'].includes(target.protocol)||isPrivateHost(target.hostname))return res.status(400).json({error:'Ongeldige receptlink.'});
     const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),12000);
-    const upstream=await fetch(target.toString(),{signal:controller.signal,redirect:'follow',headers:{'User-Agent':'Mozilla/5.0 (compatible; MijnRecepten/1.0)','Accept':'text/html,application/xhtml+xml'}});
+    const upstream=await fetch(target.toString(),{signal:controller.signal,redirect:'follow',headers:{'User-Agent':'Mozilla/5.0 (compatible; MijnRecepten/1.1)','Accept':'text/html,application/xhtml+xml'}});
     clearTimeout(timer);
     if(!upstream.ok)throw new Error('Website antwoordde met '+upstream.status);
     const type=upstream.headers.get('content-type')||'';
